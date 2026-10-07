@@ -12,6 +12,7 @@ const state = {
   coverageSide: "baseline",
   coverageDocs: { baseline: null, candidate: null },
   coverageFile: null,
+  gapDocs: { baseline: null, candidate: null },
   migrationDoc: null,
   migrationFile: null,
   releaseDoc: null,
@@ -65,6 +66,7 @@ window.addEventListener("DOMContentLoaded", () => {
   });
   $("#btn-coverage-upload").addEventListener("click", uploadCoverage);
   $("#btn-coverage-export").addEventListener("click", exportCoverage);
+  $("#btn-gap-samples").addEventListener("click", downloadGapSamples);
   $("#btn-coverage-delete").addEventListener("click", removeCoverage);
   $("#migration-file").addEventListener("change", (e) => {
     state.migrationFile = e.target.files[0] || null;
@@ -147,6 +149,7 @@ function loadReport(doc) {
   state.analysisId = doc.analysis_id;
   state.findingsById = new Map(doc.findings.map((f) => [f.id, f]));
   state.coverageDocs = { baseline: null, candidate: null };
+  state.gapDocs = { baseline: null, candidate: null };
   state.migrationDoc = null;
   state.releaseDoc = null;
   $("#panel-result").hidden = false;
@@ -892,6 +895,7 @@ async function uploadCoverage() {
     }
     const doc = await resp.json();
     state.coverageDocs[side] = doc;
+    state.gapDocs[side] = null;
     renderCoverage();
   } catch (exc) {
     err.textContent = "上传/计算失败：" + exc.message;
@@ -927,7 +931,90 @@ async function renderCoverage() {
   }
   const has = !!doc;
   $("#btn-coverage-export").hidden = !has;
+  $("#btn-gap-samples").hidden = !has;
   $("#btn-coverage-delete").hidden = !has;
+  renderGapSamples(has);
+}
+
+async function ensureGapDoc(side) {
+  if (state.gapDocs[side]) return state.gapDocs[side];
+  const resp = await fetch(
+    `/api/analyses/${state.analysisId}/coverage/${side}/gap-samples`);
+  if (!resp.ok) {
+    const e = await resp.json().catch(() => ({}));
+    return { __error: e.detail || `HTTP ${resp.status}` };
+  }
+  const doc = await resp.json();
+  state.gapDocs[side] = doc;
+  return doc;
+}
+
+async function renderGapSamples(available) {
+  const box = $("#coverage-gap-samples");
+  if (!available) {
+    box.innerHTML = "";
+    return;
+  }
+  const side = state.coverageSide;
+  const doc = await ensureGapDoc(side);
+  if (doc && doc.__error) {
+    box.innerHTML = `<div class="replay-result replay-bad">缺口补测样本不可用：${escapeHtml(doc.__error)}</div>`;
+    return;
+  }
+  box.innerHTML = gapSamplesHtml(doc);
+}
+
+function gapSamplesHtml(doc) {
+  const s = doc.summary || {};
+  const sideZh = doc.analysis_side === "baseline" ? "基线" : "候选";
+  let hero;
+  if (s.gaps_total === 0) {
+    hero = `<div class="replay-result replay-ok" style="margin:0 0 12px">
+      ✓ 当前${sideZh}侧已无覆盖缺口，补测样本 NDJSON 为空文件。</div>`;
+  } else {
+    hero = `<div class="cov-gap-hero">
+      <div><b>覆盖缺口补测样本</b>：共 ${s.gaps_total} 个未覆盖格，
+        可生成 <span class="cov-gap-ok">${s.samples_generated}</span> 个补测调用，
+        <span class="cov-gap-na">${s.samples_unavailable}</span> 个无法可靠生成（逐格原因见下）。</div>
+      <div class="hint">下载的 NDJSON 与上传调用格式完全一致；样本状态码已避开精确码/范围键抢占，
+        路径已复核唯一归属，并经现有三态覆盖判定确认确实补上目标格。</div>
+    </div>`;
+  }
+  const cells = (doc.cells || []).map((c) => {
+    const media = c.kind === "no_content" ? "无实体响应"
+      : escapeHtml(c.media_type || "—");
+    const head = `<span class="method ${methodClass(c.method || "")}">${escapeHtml(c.method || "")}</span>
+      <code>${escapeHtml(c.path || "")}</code> ·
+      声明 <code>${escapeHtml(c.declared_status)}</code> · ${media}`;
+    if (c.generated) {
+      const preempt = c.resolved_status !== c.declared_status
+        ? ` → 实际用状态码 <code>${c.request_status}</code>（归属 <code>${escapeHtml(c.resolved_status)}</code>，避开抢占）`
+        : "";
+      const sample = (doc.samples || []).find((x) => x.ordinal === c.sample_ordinal);
+      return `<div class="cov-gap-row cov-gap-ok-row">
+        <div class="cov-gap-head">${head}
+          <span class="cov-badge cov-covered">✓ 可补测 · 第 ${c.sample_ordinal} 行</span>${preempt}</div>
+        <pre class="cov-gap-call">${escapeHtml(JSON.stringify(sample ? sample.call : {}))}</pre>
+      </div>`;
+    }
+    return `<div class="cov-gap-row cov-gap-na-row">
+      <div class="cov-gap-head">${head}
+        <span class="cov-badge cov-undetermined">无法生成</span></div>
+      <ul class="cov-gap-reasons">${(c.reasons || []).map((r) =>
+        `<li>${escapeHtml(r)}</li>`).join("")}</ul>
+    </div>`;
+  }).join("");
+  return `${hero}<div class="cov-gap-list">${cells}</div>`;
+}
+
+function downloadGapSamples() {
+  const side = state.coverageSide;
+  const a = document.createElement("a");
+  a.href = `/api/analyses/${state.analysisId}/coverage/${side}/gap-samples.ndjson`;
+  a.download = "";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
 }
 
 function coverageHtml(doc) {
@@ -1045,6 +1132,7 @@ async function removeCoverage() {
     { method: "DELETE" });
   if (resp.ok) {
     state.coverageDocs[side] = null;
+    state.gapDocs[side] = null;
     renderCoverage();
   }
 }
