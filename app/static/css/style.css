@@ -334,6 +334,12 @@ code { font-family: var(--mono); background: var(--panel-2); padding: 1px 6px;
 .cov-invalid { background: var(--breaking-bg); color: var(--breaking);
   border: 1px solid rgba(255,93,108,.35); }
 
+.gap-toolbar { display: flex; align-items: center; justify-content: space-between;
+  gap: 14px; flex-wrap: wrap; margin: 8px 0 4px; }
+.gap-sample-line { margin: 0; white-space: pre-wrap; word-break: break-all;
+  font-family: var(--mono); font-size: 11.5px; max-width: 460px;
+  color: var(--text); }
+
 /* ========================================================== release gate */
 .release-view { margin-top: 6px; }
 .release-hero { border: 1px solid var(--border); border-radius: 10px;

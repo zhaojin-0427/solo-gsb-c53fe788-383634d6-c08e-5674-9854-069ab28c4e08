@@ -47,6 +47,13 @@ requestBody 被删除（`PARAMETER_MADE_REQUIRED` / `PARAMETER_ADDED_REQUIRED` /
   确定失败分支（如缺少必填属性）里的 `not` 等命中直接丢弃，`anyOf` 已有
   确定通过时其余分支的待定命中不再传播，嵌套属性的组合确定通过即正常
   计格（见下文「调用覆盖」）；结果随分析保存并确定性导出；
+- **覆盖缺口补测样本**：在已保存覆盖结果上按选定文档侧为每个未覆盖响应格
+  生成**符合现有调用格式、可下载的 NDJSON**——状态码严格按精确码 → 范围键
+  → `default` 的抢占关系选择具体值，具体路径必须唯一归属目标模板（被其他
+  端点抢占或多模板歧义时换值，逃不开则不输出），必填参数 / 请求体 / 响应
+  载荷经现有三态覆盖判定自检、确认确实落入目标格；必填值无法可靠构造、
+  schema 待定或没有可用状态码时逐格说明原因；无缺口返回空 NDJSON，缺少
+  覆盖结果或原始文档包时明确报错（只读，不改变原覆盖与迁移结论）；
 - **请求迁移评估**：上传**基线时期** NDJSON 请求记录（兼容旧调用行，
   忽略 `response`），同一具体路径在基线与候选两侧**分别**匹配端点并
   绑定参数（模板变量改名不复用基线绑定），逐行给出两侧「确定通过 /
@@ -84,7 +91,9 @@ docker compose up --build
 上传 NDJSON 调用记录，查看覆盖矩阵与缺口（含自引用/相互引用循环、无法解析
 节点的「无法判定」行与模式位置），或直接用下文的 HTTP API 上传/查询/导出。
 保存后的覆盖结论同样体现在 `GET /api/analyses/{id}/coverage/{side}` 与
-确定性导出中，页面、API、导出三者逐行一致。
+确定性导出中，页面、API、导出三者逐行一致。**覆盖矩阵下方可直接生成并下载
+「覆盖缺口补测样本 NDJSON」**：每个未覆盖格一行符合同格式的补测调用，无法
+生成的格逐格说明原因（见下文「覆盖缺口补测样本」）。
 
 也可在页面「比对结果 → **发布放行**」标签中查看完整 findings 的逐项依据、
 为指定破坏性或无法判定 finding 填写理由和 UTC 到期时间，顶部会显示
@@ -144,6 +153,8 @@ pytest -q
 | `POST` | `/api/analyses/{id}/coverage/{side}` | 上传 NDJSON 调用记录，计算 `baseline`/`candidate` 侧调用覆盖 |
 | `GET` | `/api/analyses/{id}/coverage` | 查询两侧调用覆盖的可用性与汇总 |
 | `GET` | `/api/analyses/{id}/coverage/{side}` | 获取某侧完整调用覆盖文档（矩阵、缺口、逐行原因） |
+| `GET` | `/api/analyses/{id}/coverage/{side}/gap-samples` | 按已保存覆盖结果的未覆盖格生成**覆盖缺口补测样本**（逐格样本/无法生成原因，内嵌 NDJSON） |
+| `GET` | `/api/analyses/{id}/coverage/{side}/gap-samples/ndjson` | 下载补测样本 **NDJSON**（无缺口时为 0 字节；带样本数与 SHA-256 指纹头） |
 | `GET` | `/api/analyses/{id}/coverage/{side}/export` | 确定性导出某侧调用覆盖 JSON（带 SHA-256 指纹头） |
 | `DELETE` | `/api/analyses/{id}/coverage/{side}` | 删除某侧调用覆盖结果 |
 | `POST` | `/api/analyses/{id}/migration` | 上传基线时期 NDJSON 请求记录，计算请求迁移评估（双侧三态 + 受影响汇总） |
@@ -393,6 +404,92 @@ curl -s "http://localhost:8000/api/analyses/$AID/export" -o report.json
 
 重复上传同一侧会**替换**旧结果；`DELETE` 删除指定侧；分析被删除时其覆盖一并删除。
 相同 NDJSON 输入永远产生字节一致的导出（含逐行原因，覆盖格只记录最早一行覆盖调用）。
+
+## 覆盖缺口补测样本（Coverage Gap Samples）
+
+对一份**已保存**的调用覆盖结果，可以按选定文档侧（基线 / 候选）为每个
+**未覆盖响应格**生成一行**符合现有调用格式**的补测样本，直接可下载为
+**NDJSON**（与上文 NDJSON 行格式完全一致，可重新上传给覆盖引擎）。生成是
+**只读**的：不会修改原覆盖结论、请求迁移评估或发布放行裁决。
+
+综合样本时严格复用覆盖引擎自身的归属与三态判定，而不是另写启发式：
+
+1. **状态码按真实归属选具体值**——精确码抢占范围键、范围键抢占
+   `default`：
+   - 精确码格直接用该码；
+   - `2XX` 等范围键格在同族 100 个码中选**未被精确码抢占**的最小具体码
+     （如同时声明了 `200` 与 `2XX`，`2XX` 格样本使用 `201`）；
+   - `default` 格在 100–599 中选既不是精确码、也不落入任何已声明范围键
+     的具体码（优先 `404/500/400/…`；例如声明了 `5XX` 就不会再选 5xx 码）；
+   - 同族 100 个码全部被精确码抢占、或找不到任何空闲码时**不输出样本**，
+     逐格说明原因。
+2. **具体路径必须唯一归属目标模板**：先精确路径、再唯一模板。模板路径被
+   其他端点的精确路径抢占、精确路径存在但不支持该方法、或具体路径同时命中
+   多个模板时，会尝试其它满足路径参数约束的取值；所有取值都被抢占 / 歧义
+   （如路径参数枚举只允许抢占值）或模板占位符未声明 `in:path` 参数时，
+   **不输出归错格的样本**。
+3. **必填值经三态自检**：只带必填 query/header/cookie 参数与必填请求体
+   （可选项按旧客户端惯例省略），请求体 / 响应载荷由 schema 综合最小取值，
+   并由覆盖引擎的 `assess` 确认**确定通过**；必填参数 / 请求体无法可靠
+   构造（`$ref` 不可解析、只有 `application/octet-stream` 等非 JSON 媒体）、
+   schema 待定（`pattern` / `not` 等未支持关键字、自 / 互引用循环、不可
+   解析节点）时该格记入“无法生成”并给出原因。
+4. **无缺口时 NDJSON 为空**（0 字节）；缺少已保存覆盖结果返回 `404`、
+   缺少原始文档包返回 `409`，未知文档侧返回 `400`。
+
+### 页面使用
+
+一键启动后，打开「比对结果 → **调用覆盖**」标签，选择基线 / 候选侧并上传
+NDJSON 覆盖记录；覆盖矩阵下方会出现「**覆盖缺口补测样本**」区：逐格列出
+状态码选择（声明码 → 实际选用的具体码）与完整 NDJSON 行，无法生成的格
+单独列表逐格说明原因。点击「**⬇ 下载补测样本 NDJSON**」（或工具栏
+「⬇ 缺口补测 NDJSON」）即可下载；把该 NDJSON 与原调用记录合并重新上传，
+生成样本对应的缺口格即变为已覆盖。
+
+### HTTP API
+
+```bash
+# 逐格文档：samples[]（含 sample 调用对象）、unavailable[]（逐格原因）、ndjson
+curl -s "http://localhost:8000/api/analyses/$AID/coverage/baseline/gap-samples"
+
+# 直接下载 NDJSON（Content-Type: application/x-ndjson；无缺口时为 0 字节）
+curl -s -D - "http://localhost:8000/api/analyses/$AID/coverage/baseline/gap-samples/ndjson" \
+  -o coverage-gap-samples.ndjson
+# X-Gap-Samples-Count: <生成行数>
+# X-Gap-Samples-Fingerprint: <sha256>
+```
+
+响应（节选）形如：
+
+```json
+{
+  "schema_version": "1.0",
+  "kind": "coverage_gap_samples",
+  "analysis_side": "baseline",
+  "summary": {"gaps_total": 2, "samples": 1, "unavailable": 1},
+  "samples": [
+    {"operation": "POST /pets", "cell": "400|(no content)",
+     "declared_status": "400", "concrete_status": 400,
+     "kind": "no_content", "media_type": null,
+     "sample": {"method": "POST", "path": "/pets",
+                "query": {}, "headers": {}, "cookies": {},
+                "request": {"media_type": "application/json",
+                            "body": {"name": "x"}},
+                "response": {"status": 400}}}
+  ],
+  "unavailable": [
+    {"operation": "POST /legacy/decide", "cell": "200|application/json",
+     "declared_status": "200", "kind": "content",
+     "media_type": "application/json",
+     "reasons": ["必填请求体 application/json 的最小载荷能否通过无法判定: not（…/oneOf/1/not）"]}
+  ],
+  "ndjson": "{\"method\":\"POST\",…}\n"
+}
+```
+
+`default` / 范围键格的样本会显示 `declared_status`（如 `default`）与实际
+选用的 `concrete_status`（如 `404`）；每个生成样本都已按现有三态覆盖判定
+自检，重新上传后该调用的 `resolved_status` 与 `cell` 必然是目标格。
 
 ## 请求迁移评估（Request Migration）
 
@@ -659,6 +756,7 @@ app/
     structuralreplay.py  # 结构性 finding（参数/请求体/状态码/媒体类型增删）的结构化反例与语义重放
     comparator.py        # 兼容性比较引擎与最小反例综合
     coverage.py          # 调用覆盖：NDJSON 解析、路径归属、参数/请求体/响应体约束核对、未支持关键字沿值判定、覆盖格
+    gapsample.py         # 覆盖缺口补测样本：按缺口格综合状态码/路径/必填值并经三态自检的可下载 NDJSON（含逐格无法生成原因）
     migration.py         # 请求迁移评估：双侧独立匹配/绑定、请求参数与请求体三态校验、受影响/未受影响/不适用/待核分类与端点汇总
     release.py           # 发布放行裁决：完整 findings、例外版本绑定、过期/重算原因
     replay.py            # 双侧重放校验（模式级 + 端点级）
@@ -668,7 +766,7 @@ app/
   db.py / store.py       # PostgreSQL 持久化 + 内存降级（含调用覆盖、发布例外）
   static/                # 原生 JS 前端（无框架、无构建步骤）
 examples/                # 基线 / 候选示例文档包 + calls-baseline.ndjson 调用记录 + requests-baseline.ndjson 基线时期请求记录
-tests/                   # pytest（引擎/循环 32 项 + API 26 项 + 调用覆盖 52 项 + 请求迁移 19 项）
+tests/                   # pytest（引擎/循环 32 项 + API 26 项 + 调用覆盖 52 项 + 覆盖缺口补测样本 20 项 + 请求迁移 19 项）
 ```
 
 ## 说明与边界

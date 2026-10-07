@@ -12,6 +12,7 @@ const state = {
   coverageSide: "baseline",
   coverageDocs: { baseline: null, candidate: null },
   coverageFile: null,
+  coverageGapDocs: { baseline: null, candidate: null },
   migrationDoc: null,
   migrationFile: null,
   releaseDoc: null,
@@ -65,6 +66,7 @@ window.addEventListener("DOMContentLoaded", () => {
   });
   $("#btn-coverage-upload").addEventListener("click", uploadCoverage);
   $("#btn-coverage-export").addEventListener("click", exportCoverage);
+  $("#btn-coverage-gapndjson").addEventListener("click", exportGapSamples);
   $("#btn-coverage-delete").addEventListener("click", removeCoverage);
   $("#migration-file").addEventListener("change", (e) => {
     state.migrationFile = e.target.files[0] || null;
@@ -147,6 +149,7 @@ function loadReport(doc) {
   state.analysisId = doc.analysis_id;
   state.findingsById = new Map(doc.findings.map((f) => [f.id, f]));
   state.coverageDocs = { baseline: null, candidate: null };
+  state.coverageGapDocs = { baseline: null, candidate: null };
   state.migrationDoc = null;
   state.releaseDoc = null;
   $("#panel-result").hidden = false;
@@ -892,6 +895,7 @@ async function uploadCoverage() {
     }
     const doc = await resp.json();
     state.coverageDocs[side] = doc;
+    state.coverageGapDocs[side] = null;
     renderCoverage();
   } catch (exc) {
     err.textContent = "上传/计算失败：" + exc.message;
@@ -923,11 +927,96 @@ async function renderCoverage() {
     body.innerHTML = `<p class="hint">尚未为${side === "baseline" ? "基线" : "候选"}上传调用记录（NDJSON）。
       选择文件后点击「上传 NDJSON 计算覆盖」。</p>`;
   } else {
-    body.innerHTML = coverageHtml(doc);
+    body.innerHTML = coverageHtml(doc)
+      + `<div id="coverage-gaps"></div>`;
+    loadGapSamples(side);
   }
   const has = !!doc;
   $("#btn-coverage-export").hidden = !has;
+  $("#btn-coverage-gapndjson").hidden = !has;
   $("#btn-coverage-delete").hidden = !has;
+}
+
+async function loadGapSamples(side) {
+  const box = $("#coverage-gaps");
+  if (!box) return;
+  box.innerHTML = `<p class="hint" style="margin-top:18px">正在按当前缺口生成补测样本…</p>`;
+  let doc = state.coverageGapDocs[side];
+  if (!doc) {
+    const resp = await fetch(
+      `/api/analyses/${state.analysisId}/coverage/${side}/gap-samples`);
+    if (!resp.ok) {
+      const e = await resp.json().catch(() => ({}));
+      box.innerHTML = `<div class="replay-result replay-bad">
+        覆盖缺口补测样本生成失败：${escapeHtml(e.detail || `HTTP ${resp.status}`)}</div>`;
+      return;
+    }
+    doc = await resp.json();
+    state.coverageGapDocs[side] = doc;
+  }
+  box.innerHTML = gapSamplesHtml(doc);
+  $("#btn-gap-download")?.addEventListener("click", exportGapSamples);
+}
+
+function gapCellLabel(item) {
+  return `<span class="method ${methodClass(item.method || "")}">${escapeHtml(item.method || "")}</span>
+    <code>${escapeHtml(item.path_template || "")}</code> ·
+    格 <code>${escapeHtml((item.cell || "").replace("|", " · "))}</code>`;
+}
+
+function gapSamplesHtml(doc) {
+  const s = doc.summary || { gaps_total: 0, samples: 0, unavailable: 0 };
+  const samples = doc.samples || [];
+  const unavailable = doc.unavailable || [];
+  if (!s.gaps_total) {
+    return `<h4 class="cov-section-title">覆盖缺口补测样本</h4>
+      <div class="cov-op"><p class="hint" style="margin:0">没有未覆盖响应格：
+      补测 NDJSON 为空，无需补测。</p></div>`;
+  }
+  const sampleRows = samples.map((g) => {
+    const statusNote = g.concrete_status !== Number(g.declared_status)
+      ? `声明 <code>${escapeHtml(g.declared_status)}</code> →
+         选用具体码 <code>${escapeHtml(String(g.concrete_status))}</code>
+         <small>（精确码抢占范围、范围抢占 default）</small>`
+      : `状态码 <code>${escapeHtml(String(g.concrete_status))}</code>`;
+    return `<tr>
+      <td>${gapCellLabel(g)}</td>
+      <td class="cov-reasons">${statusNote}</td>
+      <td><pre class="gap-sample-line">${escapeHtml(
+        JSON.stringify(g.sample, null, 0))}</pre></td>
+    </tr>`;
+  }).join("");
+  const unRows = unavailable.map((g) => `<tr>
+      <td>${gapCellLabel(g)}</td>
+      <td class="cov-reasons">${(g.reasons || []).map(escapeHtml)
+          .join("<br>")}</td>
+    </tr>`).join("");
+  return `
+    <h4 class="cov-section-title">覆盖缺口补测样本（可下载 NDJSON）</h4>
+    <div class="gap-toolbar">
+      <span class="hint">缺口共 <b>${s.gaps_total}</b> 格：
+        <b style="color:var(--compatible)">${s.samples} 格已生成补测样本</b>
+        （经现有三态覆盖判定自检，确实落入目标格），
+        <b style="color:var(--breaking)">${s.unavailable} 格无法生成</b>（见下表逐格原因）。
+        无缺口时下载到的是空 NDJSON。</span>
+      <button class="btn btn-primary btn-sm" id="btn-gap-download">
+        ⬇ 下载补测样本 NDJSON（${s.samples} 行）</button>
+    </div>
+    ${sampleRows ? `
+    <div class="cov-rows-wrap" style="margin-top:10px">
+      <table class="cov-rows">
+        <thead><tr><th>目标格</th><th>状态码选择</th><th>NDJSON 行（现有调用格式）</th></tr></thead>
+        <tbody>${sampleRows}</tbody>
+      </table>
+    </div>` : ""}
+    ${unRows ? `
+    <h4 class="cov-section-title">无法生成样本的缺口（逐格原因）</h4>
+    <div class="cov-rows-wrap">
+      <table class="cov-rows">
+        <thead><tr><th>目标格</th><th>无法生成的原因</th></tr></thead>
+        <tbody>${unRows}</tbody>
+      </table>
+    </div>` : ""}`;
 }
 
 function coverageHtml(doc) {
@@ -1037,6 +1126,17 @@ function exportCoverage() {
   a.remove();
 }
 
+function exportGapSamples() {
+  const side = state.coverageSide;
+  const a = document.createElement("a");
+  a.href = `/api/analyses/${state.analysisId}/coverage/${side}`
+    + "/gap-samples/ndjson";
+  a.download = "";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
 async function removeCoverage() {
   const side = state.coverageSide;
   if (!confirm(`确定删除${side === "baseline" ? "基线" : "候选"}侧的调用覆盖结果？`)) return;
@@ -1045,6 +1145,7 @@ async function removeCoverage() {
     { method: "DELETE" });
   if (resp.ok) {
     state.coverageDocs[side] = null;
+    state.coverageGapDocs[side] = null;
     renderCoverage();
   }
 }

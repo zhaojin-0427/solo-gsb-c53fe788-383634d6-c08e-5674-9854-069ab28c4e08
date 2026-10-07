@@ -7,6 +7,7 @@ from ..analysis import analyze, filter_report, from_envelope
 from ..config import settings
 from ..services.loader import PackageError
 from ..services.coverage import CoverageError, build_coverage
+from ..services.gapsample import GapSampleError, build_gap_samples
 from ..services.migration import MigrationError, build_migration
 from ..services.release import build_release_decision, iso_utc, parse_datetime, \
     report_version, utc_now
@@ -354,6 +355,66 @@ def export_coverage(analysis_id: str, side: str):
         headers={"Content-Disposition":
                  f'attachment; filename="{filename}"',
                  "X-Coverage-Fingerprint": _fingerprint(payload)})
+
+
+# ------------------------------------------------- 覆盖缺口补测样本
+def _gap_inputs(analysis_id: str, side: str):
+    """加载生成补测样本所需的已保存覆盖结果与原始文档包。"""
+    if side not in COVERAGE_SIDES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"未知文档侧 {side!r}，可选 baseline/candidate")
+    if not store.get(analysis_id):
+        raise HTTPException(status_code=404, detail="分析不存在")
+    coverage = store.get_coverage(analysis_id) or {}
+    doc = coverage.get(side)
+    if doc is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"该分析尚未保存{side}侧调用覆盖结果，"
+                   "无法生成覆盖缺口补测样本")
+    packages = store.get_packages(analysis_id)
+    if not packages:
+        raise HTTPException(status_code=409,
+                            detail="原始文档包不可用，无法生成补测样本")
+    return doc, from_envelope(packages[side])
+
+
+@router.get("/analyses/{analysis_id}/coverage/{side}/gap-samples")
+def get_gap_samples(analysis_id: str, side: str):
+    """逐格说明未覆盖响应格的补测样本（含可下载 NDJSON 文本）。"""
+    doc, pkg = _gap_inputs(analysis_id, side)
+    try:
+        result = build_gap_samples(pkg, side, doc)
+    except GapSampleError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except Exception as exc:  # defensive: surface generator bugs as 422
+        raise HTTPException(status_code=422,
+                            detail=f"覆盖缺口补测样本生成失败: "
+                                   f"{exc.__class__.__name__}: {exc}")
+    return result
+
+
+@router.get("/analyses/{analysis_id}/coverage/{side}/gap-samples/ndjson")
+def export_gap_samples(analysis_id: str, side: str):
+    """下载补测样本 NDJSON；无缺口时返回空 NDJSON（0 字节）。"""
+    doc, pkg = _gap_inputs(analysis_id, side)
+    try:
+        result = build_gap_samples(pkg, side, doc)
+    except GapSampleError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except Exception as exc:  # defensive: surface generator bugs as 422
+        raise HTTPException(status_code=422,
+                            detail=f"覆盖缺口补测样本生成失败: "
+                                   f"{exc.__class__.__name__}: {exc}")
+    payload = result["ndjson"].encode("utf-8")
+    filename = f"coverage-gap-samples-{analysis_id}-{side}.ndjson"
+    return Response(
+        content=payload, media_type="application/x-ndjson; charset=utf-8",
+        headers={"Content-Disposition":
+                 f'attachment; filename="{filename}"',
+                 "X-Gap-Samples-Count": str(result["summary"]["samples"]),
+                 "X-Gap-Samples-Fingerprint": _fingerprint(payload.decode())})
 
 
 # --------------------------------------------------------------- 请求迁移

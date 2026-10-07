@@ -108,6 +108,7 @@
             <input type="file" id="coverage-file" accept=".ndjson,.jsonl,.json,.txt" />
             <button id="btn-coverage-upload" class="btn btn-primary btn-sm" disabled>上传 NDJSON 计算覆盖</button>
             <button id="btn-coverage-export" class="btn btn-ghost btn-sm" hidden>⬇ 导出覆盖 JSON</button>
+            <button id="btn-coverage-gapndjson" class="btn btn-ghost btn-sm" hidden>⬇ 缺口补测 NDJSON</button>
             <button id="btn-coverage-delete" class="btn btn-ghost btn-sm" hidden>删除</button>
             <span id="coverage-error" class="error-text"></span>
           </div>
@@ -118,7 +119,9 @@
           含 <code>media_type</code> 与 JSON <code>body</code>（缺省 <code>body</code> 表示无实体），
           <code>response</code> 含整数 <code>status</code>。路径先精确后唯一模板；
           覆盖格 = 响应状态码 × JSON 媒体类型（无 content 单列），仅在请求参数 / 请求体 /
-          响应体可判定约束均通过时计入覆盖。
+          响应体可判定约束均通过时计入覆盖。已保存结果后可按<b>当前缺口</b>生成符合同样格式的
+          <b>覆盖缺口补测样本 NDJSON</b>（状态码严格按精确码 → 范围键 → default 归属，
+          无法可靠构造的格逐格说明原因）。
         </p>
         <div id="coverage-body"></div>
       </div>
